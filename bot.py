@@ -6,13 +6,16 @@ import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, JobQueue
+import pytz
 
 # ========== CONFIG ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
 SHEET_ID = os.environ.get("SHEET_ID")
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")  # chat_id ของเจ้าของ
+TZ = pytz.timezone("Asia/Bangkok")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -21,12 +24,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# ========== แคตตาล็อกสินค้า ==========
 PRODUCTS = {
-    "5000": {"name": "5000 เครดิต", "cost": 1000, "price": 1490},
+    "5000":  {"name": "5000 เครดิต",  "cost": 1000, "price": 1490},
     "10000": {"name": "10000 เครดิต", "cost": 1200, "price": 1690},
     "25000": {"name": "25000 เครดิต", "cost": 1500, "price": 2190},
-    "grok": {"name": "Grok", "cost": 250, "price": 599},
+    "grok":  {"name": "Grok",         "cost": 250,  "price": 599},
 }
 
 # ========== GOOGLE SHEETS ==========
@@ -39,8 +41,6 @@ def get_gc():
 def init_sheets():
     gc = get_gc()
     sh = gc.open_by_key(SHEET_ID)
-
-    # Sheet ลูกค้า
     try:
         sh.worksheet("ลูกค้า")
     except gspread.WorksheetNotFound:
@@ -52,65 +52,52 @@ def init_sheets():
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "horizontalAlignment": "CENTER"
         })
-
-    # Sheet บัญชี
     try:
         sh.worksheet("บัญชี")
     except gspread.WorksheetNotFound:
         ws2 = sh.add_worksheet("บัญชี", rows=1000, cols=7)
-        ws2.append_row(["วันที่", "อีเมลลูกค้า", "แพ็กเกจ", "ราคาขาย", "ต้นทุน", "กำไร", "% กำไร"])
+        ws2.append_row(["วันที่", "อีเมลลูกค้า", "แพ็กเกจ",
+                        "ราคาขาย (บาท)", "ต้นทุน (บาท)", "กำไร (บาท)", "% กำไร"])
         ws2.format("A1:G1", {
             "backgroundColor": {"red": 0.22, "green": 0.34, "blue": 0.14},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "horizontalAlignment": "CENTER"
         })
-
     return sh
 
-def get_next_id(sh):
-    ws = sh.worksheet("ลูกค้า")
-    ids = ws.col_values(1)[1:]
-    numeric = [int(i) for i in ids if str(i).isdigit()]
-    return max(numeric) + 1 if numeric else 1
-
 def add_orders_batch(orders_list, order_date=None):
-    """บันทึกหลายออเดอร์พร้อมกันใน batch เดียว — ลด API calls"""
     sh = init_sheets()
-    today = datetime.now()
-    order_dt = datetime.strptime(order_date, "%Y-%m-%d") if order_date else today
+    today = datetime.now(TZ)
+    order_dt = datetime.strptime(order_date, "%Y-%m-%d").replace(tzinfo=TZ) if order_date else today
     today_str = order_dt.strftime("%Y-%m-%d")
     expire = (order_dt + timedelta(days=30)).strftime("%Y-%m-%d")
 
     ws_c = sh.worksheet("ลูกค้า")
     ws_a = sh.worksheet("บัญชี")
 
-    # ดึงข้อมูลที่จำเป็นครั้งเดียว
     existing_ids = ws_c.col_values(1)[1:]
     numeric = [int(i) for i in existing_ids if str(i).isdigit()]
     next_id = max(numeric) + 1 if numeric else 1
     next_row_a = len(ws_a.col_values(1)) + 1
 
-    rows_c = []
-    rows_a = []
-    results = []
-    errors = []
+    rows_c, rows_a, results, errors = [], [], [], []
 
     for o in orders_list:
         pkg = PRODUCTS.get(str(o.get("package_key", "")).lower())
         if not pkg:
             errors.append({"email": o.get("email"), "error": "ไม่พบแพ็กเกจ"})
             continue
-
         email = o.get("email", "")
         profit = pkg["price"] - pkg["cost"]
         margin = profit / pkg["price"] * 100
 
         rows_c.append([next_id, "", email, "", pkg["name"],
-                        pkg["price"], pkg["cost"], today_str, expire, "ใช้งานได้"])
+                       pkg["price"], pkg["cost"], today_str, expire, "ใช้งานได้"])
 
         profit_f = f"=D{next_row_a}-E{next_row_a}"
         margin_f = f"=IF(D{next_row_a}=0,0,F{next_row_a}/D{next_row_a})"
-        rows_a.append([today_str, email, pkg["name"], pkg["price"], pkg["cost"], profit_f, margin_f])
+        rows_a.append([today_str, email, pkg["name"],
+                       pkg["price"], pkg["cost"], profit_f, margin_f])
 
         results.append({
             "id": next_id, "email": email, "package": pkg["name"],
@@ -118,11 +105,9 @@ def add_orders_batch(orders_list, order_date=None):
             "profit": profit, "margin": margin,
             "expire": expire, "date": today_str
         })
-
         next_id += 1
         next_row_a += 1
 
-    # เขียนพร้อมกันทีเดียว
     if rows_c:
         ws_c.append_rows(rows_c)
     if rows_a:
@@ -130,12 +115,9 @@ def add_orders_batch(orders_list, order_date=None):
 
     return results, errors
 
-def add_order(email, package_key, name="", phone="", note="", order_date=None):
-    """เพิ่มออเดอร์เดียว"""
+def add_order(email, package_key, name="", phone="", order_date=None):
     results, errors = add_orders_batch(
-        [{"email": email, "package_key": package_key}],
-        order_date=order_date
-    )
+        [{"email": email, "package_key": package_key}], order_date=order_date)
     if errors:
         return None, errors[0]["error"]
     return results[0], None
@@ -144,69 +126,73 @@ def daily_summary(date_str=None):
     sh = init_sheets()
     ws = sh.worksheet("บัญชี")
     rows = ws.get_all_records()
-
     if not date_str:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-
+        date_str = datetime.now(TZ).strftime("%Y-%m-%d")
     day_rows = [r for r in rows if str(r.get("วันที่", ""))[:10] == date_str]
-
     total_price = sum(float(r.get("ราคาขาย (บาท)", 0) or 0) for r in day_rows)
-    total_cost = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in day_rows)
+    total_cost  = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in day_rows)
     total_profit = total_price - total_cost
     margin = (total_profit / total_price * 100) if total_price > 0 else 0
-
-    return {
-        "date": date_str,
-        "orders": len(day_rows),
-        "total_price": total_price,
-        "total_cost": total_cost,
-        "total_profit": total_profit,
-        "margin": margin
-    }
+    return {"date": date_str, "orders": len(day_rows),
+            "total_price": total_price, "total_cost": total_cost,
+            "total_profit": total_profit, "margin": margin}
 
 def overall_summary():
-    """รวมยอดทั้งหมด"""
     sh = init_sheets()
     ws_c = sh.worksheet("ลูกค้า")
     ws_a = sh.worksheet("บัญชี")
-    today = datetime.now()
+    today = datetime.now(TZ).date()
 
     customers = ws_c.get_all_records()
     total = len(customers)
-    active = sum(1 for r in customers if str(r.get("สถานะ", "")) == "ใช้งานได้")
-    expired = total - active
+    active = 0
+    expired = 0
+    for r in customers:
+        exp_str = str(r.get("วันหมดอายุ", ""))[:10]
+        try:
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            if exp_date >= today:
+                active += 1
+            else:
+                expired += 1
+        except:
+            expired += 1
 
     transactions = ws_a.get_all_records()
     total_price = sum(float(r.get("ราคาขาย (บาท)", 0) or 0) for r in transactions)
-    total_cost = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in transactions)
+    total_cost  = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in transactions)
     profit = total_price - total_cost
     margin = (profit / total_price * 100) if total_price > 0 else 0
-
-    return {
-        "total_customers": total, "active": active, "expired": expired,
-        "total_price": total_price, "total_cost": total_cost,
-        "profit": profit, "margin": margin
-    }
+    return {"total_customers": total, "active": active, "expired": expired,
+            "total_price": total_price, "total_cost": total_cost,
+            "profit": profit, "margin": margin}
 
 def check_expiring(days=7):
     sh = init_sheets()
     ws = sh.worksheet("ลูกค้า")
     rows = ws.get_all_records()
-    today = datetime.now()
+    today = datetime.now(TZ)
     expiring = []
     for row in rows:
         try:
             exp = datetime.strptime(str(row.get("วันหมดอายุ", ""))[:10], "%Y-%m-%d")
-            diff = (exp - today).days
+            diff = (exp.date() - today.date()).days
             if 0 <= diff <= days:
                 expiring.append({
                     "name": row.get("ชื่อ"), "email": row.get("อีเมล"),
-                    "phone": row.get("เบอร์โทร"), "package": row.get("แพ็กเกจ"),
+                    "package": row.get("แพ็กเกจ"),
                     "expire": str(row.get("วันหมดอายุ"))[:10], "days_left": diff
                 })
         except:
             pass
     return expiring
+
+def get_expired_today():
+    sh = init_sheets()
+    ws = sh.worksheet("ลูกค้า")
+    rows = ws.get_all_records()
+    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    return [r for r in rows if str(r.get("วันหมดอายุ", ""))[:10] == today_str]
 
 def search_customer(keyword):
     sh = init_sheets()
@@ -222,7 +208,7 @@ def search_customer(keyword):
 
 # ========== CLAUDE AI ==========
 
-PRODUCT_LIST = "\n".join([f'- "{k}": {v["name"]} ราคาขาย {v["price"]} บาท ต้นทุน {v["cost"]} บาท'
+PRODUCT_LIST = "\n".join([f'- "{k}": {v["name"]} ราคาขาย {v["price"]} ต้นทุน {v["cost"]} บาท'
                            for k, v in PRODUCTS.items()])
 
 SYSTEM_PROMPT = f"""คุณคือผู้ช่วยธุรกิจ ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่น
@@ -231,72 +217,63 @@ FORMAT:
 {{"action": "...", "data": {{}}, "reply": "..."}}
 
 ACTION:
-- "add_order": รับออเดอร์ใหม่ (data: email, package_key, order_date YYYY-MM-DD หรือ "" สำหรับวันนี้)
-- "add_orders_bulk": รับออเดอร์หลายรายการพร้อมกัน (data: order_date YYYY-MM-DD หรือ "", orders: list of {{email, package_key}})
-- "daily_summary": รวมยอดกำไรวันที่ระบุ (data: date YYYY-MM-DD หรือ "" สำหรับวันนี้)
+- "add_order": ออเดอร์เดียว (data: email, package_key, order_date YYYY-MM-DD หรือ "")
+- "add_orders_bulk": หลายออเดอร์ (data: order_date, orders: [{{email, package_key}}])
+- "daily_summary": รวมยอดวัน (data: date YYYY-MM-DD หรือ "")
 - "summary": รวมยอดทั้งหมด
 - "check_expiring": ใกล้หมดอายุ (data: days)
-- "search": ค้นหาลูกค้า (data: keyword)
+- "search": ค้นหา (data: keyword)
 - "chat": แค่คุย
 
-แพ็กเกจที่มี:
+แพ็กเกจ:
 {PRODUCT_LIST}
 
-FORMAT ออเดอร์ที่รองรับ:
-ผู้ใช้อาจส่งออเดอร์แบบนี้ (หลายรายการในข้อความเดียว):
-  O1-5000 old done ✅
-  somchai@gmail.com
-  O2-grok new done
-  malee@gmail.com
+กฎอ่านออเดอร์:
+- O1-5000 old done ✅ → package_key: "5000"
+- O2-grok new → package_key: "grok"
+- บรรทัดมี @ = อีเมลของออเดอร์บรรทัดก่อน
+- คำว่า old/new/done/✅/❌ ละเว้นทั้งหมด
+- หลายออเดอร์ → add_orders_bulk
+- ย้อนหลัง เช่น "วันที่ 17 พ.ค." → order_date: "2026-05-17"
 
-กฎการอ่าน:
-- บรรทัดที่ขึ้นต้นด้วย O + ตัวเลข + - ให้ดึงแค่ตัวเลขหลัง - เป็น package_key (เช่น O7-10000 → "10000", O1-5000 → "5000", O2-grok → "grok")
-- คำว่า old, new, done, ✅, ❌ และอีโมจิอื่นๆ ให้ละเว้นทั้งหมด
-- บรรทัดที่มี @ คืออีเมลของออเดอร์ก่อนหน้า
-- ถ้ามีหลายออเดอร์ ให้ใช้ action: "add_orders_bulk"
-- ถ้ามีออเดอร์เดียว ให้ใช้ action: "add_order"
-
-ถ้าผู้ใช้ระบุวันที่ย้อนหลัง เช่น "ย้อนหลังวันที่ 17 พ.ค." หรือ "บันทึกวันที่ 2026-05-17" ให้ใส่ order_date เป็นวันนั้น
-ถ้าไม่ระบุวันให้ใช้ "" (วันนี้)
-
-ตัวอย่าง input ย้อนหลัง:
-  บันทึกย้อนหลังวันที่ 17 พ.ค.
-  O1-5000 old done ✅
-  somchai@gmail.com
-→ {{"action": "add_orders_bulk", "data": {{"order_date": "2026-05-17", "orders": [{{"email": "somchai@gmail.com", "package_key": "5000"}}]}}}}
-
-ตัวอย่าง input ปกติ (วันนี้):
-  O7-10000 old done ✅
-  wassinner5@gmail.com
-→ {{"action": "add_order", "data": {{"email": "wassinner5@gmail.com", "package_key": "10000", "order_date": ""}}}}
-
-ตัวอย่าง input หลายรายการ:
-  O1-5000 old done ✅
-  fightforyout2@gmail.com
-  O2-grok new
-  malee@gmail.com
-→ {{"action": "add_orders_bulk", "data": {{"order_date": "", "orders": [{{"email": "fightforyout2@gmail.com", "package_key": "5000"}}, {{"email": "malee@gmail.com", "package_key": "grok"}}]}}}}
-
-คำสั่งอื่น:
-- "รวมยอดวันนี้" → daily_summary, date: ""
-- "รวมยอดวันที่ 18 พ.ค." → daily_summary, date: "2026-05-18"
-- "สรุปยอดรวม" → summary
-- "ใครหมดอายุสัปดาห์นี้" → check_expiring, days: 7
-
-วันนี้คือ {datetime.now().strftime("%Y-%m-%d")}
+วันนี้คือ {datetime.now(TZ).strftime("%Y-%m-%d")}
 """
 
 def ask_claude(user_message):
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=800,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}]
     )
     text = re.sub(r"```json|```", "", response.content[0].text.strip()).strip()
     return json.loads(text)
 
-# ========== TELEGRAM ==========
+# ========== แจ้งกำไรต่อวันทุกออเดอร์ ==========
+
+async def get_daily_profit_line(order_date=None):
+    s = daily_summary(order_date)
+    return f"📊 กำไรวันนี้รวม {s['orders']} ออเดอร์: {s['total_profit']:,.0f} บาท ({s['margin']:.1f}%)"
+
+# ========== MORNING ALERT 08:00 ==========
+
+async def morning_alert(context):
+    if not OWNER_CHAT_ID:
+        return
+    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    expired_today = get_expired_today()
+
+    if not expired_today:
+        msg = f"🌅 {today_str}\n✅ วันนี้ไม่มีลูกค้าหมดอายุ"
+    else:
+        lines = [f"🌅 {today_str} — หมดอายุวันนี้ {len(expired_today)} ราย:\n"]
+        for r in expired_today:
+            lines.append(f"• 📧 {r.get('อีเมล')} | 📦 {r.get('แพ็กเกจ')}")
+        msg = "\n".join(lines)
+
+    await context.bot.send_message(chat_id=int(OWNER_CHAT_ID), text=msg)
+
+# ========== TELEGRAM HANDLER ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
@@ -312,13 +289,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order, err = add_order(
                 email=data.get("email", ""),
                 package_key=data.get("package_key", ""),
-                name=data.get("name", ""),
-                phone=data.get("phone", ""),
                 order_date=data.get("order_date") or None,
             )
             if err:
                 reply = f"❌ {err}"
             else:
+                daily_line = await get_daily_profit_line(order.get("date"))
                 date_label = f" (ย้อนหลัง {order['date']})" if data.get("order_date") else ""
                 reply = (
                     f"✅ บันทึกออเดอร์แล้ว{date_label}!\n"
@@ -327,7 +303,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💰 ราคาขาย: {order['price']:,} บาท\n"
                     f"💸 ต้นทุน: {order['cost']:,} บาท\n"
                     f"📈 กำไรออเดอร์นี้: {order['profit']:,} บาท ({order['margin']:.1f}%)\n"
-                    f"📅 หมดอายุ: {order['expire']}"
+                    f"📅 หมดอายุ: {order['expire']}\n\n"
+                    f"{daily_line}"
                 )
 
         elif action == "add_orders_bulk":
@@ -336,16 +313,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results, errors = add_orders_batch(orders, order_date=order_date)
 
             total_profit = sum(o["profit"] for o in results)
-            lines = [f"📋 บันทึก {len(results)}/{len(orders)} ออเดอร์{'  (ย้อนหลัง ' + order_date + ')' if order_date else ''}\n"]
+            date_label = f" (ย้อนหลัง {order_date})" if order_date else ""
+            lines = [f"📋 บันทึก {len(results)}/{len(orders)} ออเดอร์{date_label}\n"]
             for o in results:
                 lines.append(f"✅ {o['email']} | {o['package']} | กำไร {o['profit']:,} บาท")
             for e in errors:
                 lines.append(f"❌ {e['email']} - {e['error']}")
-            lines.append(f"\n📈 กำไรรวมชุดนี้: {total_profit:,} บาท")
+
+            daily_line = await get_daily_profit_line(order_date)
+            lines.append(f"\n📈 กำไรชุดนี้: {total_profit:,} บาท")
+            lines.append(daily_line)
             reply = "\n".join(lines)
 
         elif action == "daily_summary":
-            date_str = data.get("date", "") or datetime.now().strftime("%Y-%m-%d")
+            date_str = data.get("date", "") or datetime.now(TZ).strftime("%Y-%m-%d")
             s = daily_summary(date_str)
             reply = (
                 f"📊 ยอดวันที่ {s['date']}\n"
@@ -359,7 +340,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s = overall_summary()
             reply = (
                 f"📊 สรุปยอดรวมทั้งหมด\n"
-                f"👥 ลูกค้า: {s['total_customers']} ราย (ใช้งาน {s['active']} / หมดอายุ {s['expired']})\n"
+                f"👥 ลูกค้า: {s['total_customers']} ราย "
+                f"(ใช้งาน {s['active']} / หมดอายุ {s['expired']})\n"
                 f"💰 รายรับรวม: {s['total_price']:,.0f} บาท\n"
                 f"💸 ต้นทุนรวม: {s['total_cost']:,.0f} บาท\n"
                 f"📈 กำไรสุทธิ: {s['profit']:,.0f} บาท ({s['margin']:.1f}%)"
@@ -371,7 +353,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if expiring:
                 lines = [f"⚠️ ใกล้หมดอายุใน {days} วัน ({len(expiring)} ราย):\n"]
                 for c in expiring:
-                    lines.append(f"• {c['name'] or c['email']} | {c['email']} - หมด {c['expire']} (อีก {c['days_left']} วัน)")
+                    lines.append(f"• {c['email']} | {c['package']} - หมด {c['expire']} (อีก {c['days_left']} วัน)")
                 reply = "\n".join(lines)
             else:
                 reply = f"✅ ไม่มีลูกค้าหมดอายุใน {days} วันข้างหน้า"
@@ -383,8 +365,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines = [f"🔍 พบ {len(results)} ราย:\n"]
                 for r in results:
                     lines.append(
-                        f"• {r.get('ชื่อ') or '-'} | {r.get('อีเมล')}\n"
-                        f"  แพ็ก: {r.get('แพ็กเกจ')} | หมด: {str(r.get('วันหมดอายุ',''))[:10]} | {r.get('สถานะ')}"
+                        f"• {r.get('อีเมล')} | {r.get('แพ็กเกจ')}\n"
+                        f"  หมด: {str(r.get('วันหมดอายุ',''))[:10]} | {r.get('สถานะ')}"
                     )
                 reply = "\n".join(lines)
             else:
@@ -405,6 +387,15 @@ def main():
     print("🤖 Bot กำลังทำงาน...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # แจ้งเตือนทุกเช้า 08:00 เวลาไทย
+    if OWNER_CHAT_ID:
+        app.job_queue.run_daily(
+            morning_alert,
+            time=datetime.strptime("08:00", "%H:%M").replace(tzinfo=TZ).timetz(),
+            name="morning_alert"
+        )
+
     app.run_polling()
 
 if __name__ == "__main__":
