@@ -73,49 +73,72 @@ def get_next_id(sh):
     numeric = [int(i) for i in ids if str(i).isdigit()]
     return max(numeric) + 1 if numeric else 1
 
-def add_order(email, package_key, name="", phone="", note="", order_date=None):
-    """เพิ่มออเดอร์ใหม่ — บันทึกทั้ง sheet ลูกค้า และ บัญชี"""
+def add_orders_batch(orders_list, order_date=None):
+    """บันทึกหลายออเดอร์พร้อมกันใน batch เดียว — ลด API calls"""
     sh = init_sheets()
     today = datetime.now()
     order_dt = datetime.strptime(order_date, "%Y-%m-%d") if order_date else today
     today_str = order_dt.strftime("%Y-%m-%d")
-
-    pkg = PRODUCTS.get(package_key.lower())
-    if not pkg:
-        return None, "ไม่พบแพ็กเกจนี้ในระบบ"
-
     expire = (order_dt + timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # === บันทึก Sheet ลูกค้า ===
     ws_c = sh.worksheet("ลูกค้า")
-    cid = get_next_id(sh)
-    row_c = [cid, name, email, phone, pkg["name"],
-             pkg["price"], pkg["cost"], today_str, expire, "ใช้งานได้"]
-    ws_c.append_row(row_c)
-    last_c = len(ws_c.col_values(1))
-    color = {"red": 0.87, "green": 0.92, "blue": 0.95} if last_c % 2 == 0 else {"red": 1, "green": 1, "blue": 1}
-    ws_c.format(f"A{last_c}:J{last_c}", {"backgroundColor": color})
-
-    # === บันทึก Sheet บัญชี ===
     ws_a = sh.worksheet("บัญชี")
-    last_a = len(ws_a.col_values(1)) + 1
-    profit_formula = f"=D{last_a}-E{last_a}"
-    margin_formula = f"=IF(D{last_a}=0,0,F{last_a}/D{last_a})"
-    row_a = [today_str, email, pkg["name"], pkg["price"], pkg["cost"], profit_formula, margin_formula]
-    ws_a.append_row(row_a, value_input_option="USER_ENTERED")
-    ws_a.format(f"G{last_a}", {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}})
-    color2 = {"red": 0.89, "green": 0.94, "blue": 0.85} if last_a % 2 == 0 else {"red": 1, "green": 1, "blue": 1}
-    ws_a.format(f"A{last_a}:G{last_a}", {"backgroundColor": color2})
 
-    profit = pkg["price"] - pkg["cost"]
-    margin = profit / pkg["price"] * 100
+    # ดึงข้อมูลที่จำเป็นครั้งเดียว
+    existing_ids = ws_c.col_values(1)[1:]
+    numeric = [int(i) for i in existing_ids if str(i).isdigit()]
+    next_id = max(numeric) + 1 if numeric else 1
+    next_row_a = len(ws_a.col_values(1)) + 1
 
-    return {
-        "id": cid, "email": email, "package": pkg["name"],
-        "price": pkg["price"], "cost": pkg["cost"],
-        "profit": profit, "margin": margin,
-        "expire": expire, "date": today_str
-    }, None
+    rows_c = []
+    rows_a = []
+    results = []
+    errors = []
+
+    for o in orders_list:
+        pkg = PRODUCTS.get(str(o.get("package_key", "")).lower())
+        if not pkg:
+            errors.append({"email": o.get("email"), "error": "ไม่พบแพ็กเกจ"})
+            continue
+
+        email = o.get("email", "")
+        profit = pkg["price"] - pkg["cost"]
+        margin = profit / pkg["price"] * 100
+
+        rows_c.append([next_id, "", email, "", pkg["name"],
+                        pkg["price"], pkg["cost"], today_str, expire, "ใช้งานได้"])
+
+        profit_f = f"=D{next_row_a}-E{next_row_a}"
+        margin_f = f"=IF(D{next_row_a}=0,0,F{next_row_a}/D{next_row_a})"
+        rows_a.append([today_str, email, pkg["name"], pkg["price"], pkg["cost"], profit_f, margin_f])
+
+        results.append({
+            "id": next_id, "email": email, "package": pkg["name"],
+            "price": pkg["price"], "cost": pkg["cost"],
+            "profit": profit, "margin": margin,
+            "expire": expire, "date": today_str
+        })
+
+        next_id += 1
+        next_row_a += 1
+
+    # เขียนพร้อมกันทีเดียว
+    if rows_c:
+        ws_c.append_rows(rows_c)
+    if rows_a:
+        ws_a.append_rows(rows_a, value_input_option="USER_ENTERED")
+
+    return results, errors
+
+def add_order(email, package_key, name="", phone="", note="", order_date=None):
+    """เพิ่มออเดอร์เดียว"""
+    results, errors = add_orders_batch(
+        [{"email": email, "package_key": package_key}],
+        order_date=order_date
+    )
+    if errors:
+        return None, errors[0]["error"]
+    return results[0], None
 
 def daily_summary(date_str=None):
     sh = init_sheets()
@@ -310,27 +333,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "add_orders_bulk":
             orders = data.get("orders", [])
             order_date = data.get("order_date") or None
-            success = []
-            errors = []
-            total_profit = 0
+            results, errors = add_orders_batch(orders, order_date=order_date)
 
-            for o in orders:
-                order, err = add_order(
-                    email=o.get("email", ""),
-                    package_key=o.get("package_key", ""),
-                    order_date=order_date,
-                )
-                if err:
-                    errors.append(f"❌ {o.get('email')} - {err}")
-                else:
-                    success.append(f"✅ {order['email']} | {order['package']} | กำไร {order['profit']:,} บาท")
-                    total_profit += order['profit']
-
-            date_label = f" (ย้อนหลัง {order_date})" if order_date else ""
-            lines = [f"📋 บันทึก {len(success)}/{len(orders)} ออเดอร์{date_label}\n"]
-            lines += success
-            if errors:
-                lines += errors
+            total_profit = sum(o["profit"] for o in results)
+            lines = [f"📋 บันทึก {len(results)}/{len(orders)} ออเดอร์{'  (ย้อนหลัง ' + order_date + ')' if order_date else ''}\n"]
+            for o in results:
+                lines.append(f"✅ {o['email']} | {o['package']} | กำไร {o['profit']:,} บาท")
+            for e in errors:
+                lines.append(f"❌ {e['email']} - {e['error']}")
             lines.append(f"\n📈 กำไรรวมชุดนี้: {total_profit:,} บาท")
             reply = "\n".join(lines)
 
