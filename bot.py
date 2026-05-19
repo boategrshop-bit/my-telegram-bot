@@ -37,9 +37,9 @@ def init_sheets():
         ws1 = sh.worksheet("ลูกค้า")
     except gspread.WorksheetNotFound:
         ws1 = sh.add_worksheet("ลูกค้า", rows=1000, cols=9)
-        ws1.append_row(["ID", "ชื่อ", "เบอร์โทร", "แพ็กเกจ", "ยอดเงิน (บาท)",
+        ws1.append_row(["ID", "ชื่อ", "อีเมล", "เบอร์โทร", "แพ็กเกจ", "ยอดเงิน (บาท)",
                         "วันสมัคร", "วันหมดอายุ", "สถานะ", "หมายเหตุ"])
-        ws1.format("A1:I1", {
+        ws1.format("A1:J1", {
             "backgroundColor": {"red": 0.18, "green": 0.46, "blue": 0.71},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "horizontalAlignment": "CENTER"
@@ -68,7 +68,7 @@ def get_next_id(sh):
     numeric = [int(i) for i in ids if str(i).isdigit()]
     return max(numeric) + 1 if numeric else 1
 
-def add_customer(name, phone, package, amount, start_date, expire_date, note=""):
+def add_customer(name, email, phone, package, amount, start_date, expire_date, note=""):
     sh = init_sheets()
     ws = sh.worksheet("ลูกค้า")
     cid = get_next_id(sh)
@@ -80,13 +80,13 @@ def add_customer(name, phone, package, amount, start_date, expire_date, note="")
         exp = today + timedelta(days=30)
 
     status = "ใช้งานได้" if exp >= today else "หมดอายุ"
-    row = [cid, name, phone, package, float(amount),
+    row = [cid, name, email, phone, package, float(amount),
            start_date, exp.strftime("%Y-%m-%d"), status, note]
     ws.append_row(row)
 
     last_row = len(ws.col_values(1))
     color = {"red": 0.87, "green": 0.92, "blue": 0.95} if last_row % 2 == 0 else {"red": 1, "green": 1, "blue": 1}
-    ws.format(f"A{last_row}:I{last_row}", {"backgroundColor": color})
+    ws.format(f"A{last_row}:J{last_row}", {"backgroundColor": color})
 
     return cid
 
@@ -119,7 +119,8 @@ def check_expiring(days=7):
             if 0 <= diff <= days:
                 expiring.append({
                     "id": row.get("ID"), "name": row.get("ชื่อ"),
-                    "phone": row.get("เบอร์โทร"), "package": row.get("แพ็กเกจ"),
+                    "email": row.get("อีเมล"), "phone": row.get("เบอร์โทร"),
+                    "package": row.get("แพ็กเกจ"),
                     "expire": str(row.get("วันหมดอายุ"))[:10], "days_left": diff
                 })
         except:
@@ -164,11 +165,13 @@ def search_customer(keyword):
     results = []
     for row in rows:
         name = str(row.get("ชื่อ", "")).lower()
+        email = str(row.get("อีเมล", "")).lower()
         phone = str(row.get("เบอร์โทร", ""))
-        if keyword.lower() in name or keyword in phone:
+        if keyword.lower() in name or keyword.lower() in email or keyword in phone:
             results.append({
                 "id": row.get("ID"), "name": row.get("ชื่อ"),
-                "phone": row.get("เบอร์โทร"), "package": row.get("แพ็กเกจ"),
+                "email": row.get("อีเมล"), "phone": row.get("เบอร์โทร"),
+                "package": row.get("แพ็กเกจ"),
                 "amount": row.get("ยอดเงิน (บาท)"),
                 "expire": str(row.get("วันหมดอายุ", ""))[:10],
                 "status": row.get("สถานะ"), "note": row.get("หมายเหตุ")
@@ -188,7 +191,7 @@ FORMAT การตอบกลับ (JSON เท่านั้น ห้า�
 }
 
 ACTION ที่รองรับ:
-- "add_customer": เพิ่มลูกค้าใหม่ (data: name, phone, package, amount, start_date YYYY-MM-DD, expire_date YYYY-MM-DD, note)
+- "add_customer": เพิ่มลูกค้าใหม่ (data: name, email, phone, package, amount, start_date YYYY-MM-DD, expire_date YYYY-MM-DD, note)
 - "add_transaction": บันทึกราคาขาย/ต้นทุน (data: date YYYY-MM-DD, name, type, selling_price, cost, note)
 - "check_expiring": ดูลูกค้าที่ใกล้หมดอายุ (data: days)
 - "summary": ดูสรุปภาพรวม
@@ -196,7 +199,7 @@ ACTION ที่รองรับ:
 - "chat": แค่คุย
 
 ตัวอย่าง:
-- "เพิ่มลูกค้าใหม่ ชื่อ สมชาย เบอร์ 0812345678 แพ็ก 30 วัน ราคา 500 บาท"
+- "เพิ่มลูกค้าใหม่ ชื่อ สมชาย อีเมล somchai@gmail.com เบอร์ 0812345678 แพ็ก 30 วัน ราคา 500 บาท"
   → action: add_customer, expire_date = start_date + 30 วัน
 - "ขายสินค้า A ได้ 2000 ต้นทุน 1200"
   → action: add_transaction, selling_price: 2000, cost: 1200
@@ -234,6 +237,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "add_customer":
             cid = add_customer(
                 name=data.get("name", ""),
+                email=data.get("email", ""),
                 phone=data.get("phone", ""),
                 package=data.get("package", ""),
                 amount=data.get("amount", 0),
@@ -269,7 +273,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if expiring:
                 lines = [f"⚠️ ลูกค้าใกล้หมดอายุภายใน {days} วัน ({len(expiring)} ราย):\n"]
                 for c in expiring:
-                    lines.append(f"• {c['name']} ({c['phone']}) - หมด {c['expire']} (อีก {c['days_left']} วัน)")
+                    lines.append(f"• {c['name']} | {c['email']} | {c['phone']} - หมด {c['expire']} (อีก {c['days_left']} วัน)")
                 reply = "\n".join(lines)
             else:
                 reply = f"✅ ไม่มีลูกค้าหมดอายุใน {days} วันข้างหน้า"
@@ -294,7 +298,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines = [f"🔍 ผลการค้นหา '{keyword}' ({len(results)} ราย):\n"]
                 for c in results:
                     lines.append(
-                        f"• [{c['id']}] {c['name']} | {c['phone']}\n"
+                        f"• [{c['id']}] {c['name']}\n"
+                        f"  📧 {c['email']} | 📞 {c['phone']}\n"
                         f"  แพ็ก: {c['package']} | หมด: {c['expire']} | {c['status']}"
                     )
                 reply = "\n".join(lines)
