@@ -119,7 +119,6 @@ def add_order(email, package_key, name="", phone="", note=""):
     }, None
 
 def daily_summary(date_str=None):
-    """รวมยอดกำไรตามวัน"""
     sh = init_sheets()
     ws = sh.worksheet("บัญชี")
     rows = ws.get_all_records()
@@ -129,8 +128,8 @@ def daily_summary(date_str=None):
 
     day_rows = [r for r in rows if str(r.get("วันที่", ""))[:10] == date_str]
 
-    total_price = sum(float(r.get("ราคาขาย", 0) or 0) for r in day_rows)
-    total_cost = sum(float(r.get("ต้นทุน", 0) or 0) for r in day_rows)
+    total_price = sum(float(r.get("ราคาขาย (บาท)", 0) or 0) for r in day_rows)
+    total_cost = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in day_rows)
     total_profit = total_price - total_cost
     margin = (total_profit / total_price * 100) if total_price > 0 else 0
 
@@ -156,8 +155,8 @@ def overall_summary():
     expired = total - active
 
     transactions = ws_a.get_all_records()
-    total_price = sum(float(r.get("ราคาขาย", 0) or 0) for r in transactions)
-    total_cost = sum(float(r.get("ต้นทุน", 0) or 0) for r in transactions)
+    total_price = sum(float(r.get("ราคาขาย (บาท)", 0) or 0) for r in transactions)
+    total_cost = sum(float(r.get("ต้นทุน (บาท)", 0) or 0) for r in transactions)
     profit = total_price - total_cost
     margin = (profit / total_price * 100) if total_price > 0 else 0
 
@@ -211,18 +210,43 @@ FORMAT:
 
 ACTION:
 - "add_order": รับออเดอร์ใหม่ (data: email, package_key, name?, phone?)
+- "add_orders_bulk": รับออเดอร์หลายรายการพร้อมกัน (data: orders: list of {{email, package_key}})
 - "daily_summary": รวมยอดกำไรวันที่ระบุ (data: date YYYY-MM-DD หรือ "" สำหรับวันนี้)
 - "summary": รวมยอดทั้งหมด
 - "check_expiring": ใกล้หมดอายุ (data: days)
 - "search": ค้นหาลูกค้า (data: keyword)
 - "chat": แค่คุย
 
-แพ็กเกจที่มี (ใช้ package_key ตามนี้):
+แพ็กเกจที่มี:
 {PRODUCT_LIST}
 
-ตัวอย่าง:
-- "somchai@gmail.com แพ็ก 5000" → add_order, email: somchai@gmail.com, package_key: "5000"
-- "somchai@gmail.com grok" → add_order, package_key: "grok"
+FORMAT ออเดอร์ที่รองรับ:
+ผู้ใช้อาจส่งออเดอร์แบบนี้ (หลายรายการในข้อความเดียว):
+  O1-5000 old done ✅
+  somchai@gmail.com
+  O2-grok new done
+  malee@gmail.com
+
+กฎการอ่าน:
+- บรรทัดที่ขึ้นต้นด้วย O + ตัวเลข + - ให้ดึงแค่ตัวเลขหลัง - เป็น package_key (เช่น O7-10000 → "10000", O1-5000 → "5000", O2-grok → "grok")
+- คำว่า old, new, done, ✅, ❌ และอีโมจิอื่นๆ ให้ละเว้นทั้งหมด
+- บรรทัดที่มี @ คืออีเมลของออเดอร์ก่อนหน้า
+- ถ้ามีหลายออเดอร์ ให้ใช้ action: "add_orders_bulk"
+- ถ้ามีออเดอร์เดียว ให้ใช้ action: "add_order"
+
+ตัวอย่าง input:
+  O7-10000 old done ✅
+  wassinner5@gmail.com
+→ {{"action": "add_order", "data": {{"email": "wassinner5@gmail.com", "package_key": "10000"}}}}
+
+ตัวอย่าง input หลายรายการ:
+  O1-5000 old done ✅
+  fightforyout2@gmail.com
+  O2-grok new
+  malee@gmail.com
+→ {{"action": "add_orders_bulk", "data": {{"orders": [{{"email": "fightforyout2@gmail.com", "package_key": "5000"}}, {{"email": "malee@gmail.com", "package_key": "grok"}}]}}}}
+
+คำสั่งอื่น:
 - "รวมยอดวันนี้" → daily_summary, date: ""
 - "รวมยอดวันที่ 18 พ.ค." → daily_summary, date: "2026-05-18"
 - "สรุปยอดรวม" → summary
@@ -272,6 +296,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📈 กำไรออเดอร์นี้: {order['profit']:,} บาท ({order['margin']:.1f}%)\n"
                     f"📅 หมดอายุ: {order['expire']}"
                 )
+
+        elif action == "add_orders_bulk":
+            orders = data.get("orders", [])
+            success = []
+            errors = []
+            total_profit = 0
+
+            for o in orders:
+                order, err = add_order(
+                    email=o.get("email", ""),
+                    package_key=o.get("package_key", ""),
+                )
+                if err:
+                    errors.append(f"❌ {o.get('email')} - {err}")
+                else:
+                    success.append(f"✅ {order['email']} | {order['package']} | กำไร {order['profit']:,} บาท")
+                    total_profit += order['profit']
+
+            lines = [f"📋 บันทึก {len(success)}/{len(orders)} ออเดอร์\n"]
+            lines += success
+            if errors:
+                lines += errors
+            lines.append(f"\n📈 กำไรรวมชุดนี้: {total_profit:,} บาท")
+            reply = "\n".join(lines)
 
         elif action == "daily_summary":
             date_str = data.get("date", "") or datetime.now().strftime("%Y-%m-%d")
