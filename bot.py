@@ -73,19 +73,18 @@ def get_next_id(sh):
     numeric = [int(i) for i in ids if str(i).isdigit()]
     return max(numeric) + 1 if numeric else 1
 
-def add_order(email, package_key, name="", phone="", note=""):
+def add_order(email, package_key, name="", phone="", note="", order_date=None):
     """เพิ่มออเดอร์ใหม่ — บันทึกทั้ง sheet ลูกค้า และ บัญชี"""
     sh = init_sheets()
     today = datetime.now()
-    today_str = today.strftime("%Y-%m-%d")
+    order_dt = datetime.strptime(order_date, "%Y-%m-%d") if order_date else today
+    today_str = order_dt.strftime("%Y-%m-%d")
 
-    # หาข้อมูลสินค้า
     pkg = PRODUCTS.get(package_key.lower())
     if not pkg:
         return None, "ไม่พบแพ็กเกจนี้ในระบบ"
 
-    # คำนวณวันหมดอายุ (30 วัน)
-    expire = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+    expire = (order_dt + timedelta(days=30)).strftime("%Y-%m-%d")
 
     # === บันทึก Sheet ลูกค้า ===
     ws_c = sh.worksheet("ลูกค้า")
@@ -115,7 +114,7 @@ def add_order(email, package_key, name="", phone="", note=""):
         "id": cid, "email": email, "package": pkg["name"],
         "price": pkg["price"], "cost": pkg["cost"],
         "profit": profit, "margin": margin,
-        "expire": expire
+        "expire": expire, "date": today_str
     }, None
 
 def daily_summary(date_str=None):
@@ -209,8 +208,8 @@ FORMAT:
 {{"action": "...", "data": {{}}, "reply": "..."}}
 
 ACTION:
-- "add_order": รับออเดอร์ใหม่ (data: email, package_key, name?, phone?)
-- "add_orders_bulk": รับออเดอร์หลายรายการพร้อมกัน (data: orders: list of {{email, package_key}})
+- "add_order": รับออเดอร์ใหม่ (data: email, package_key, order_date YYYY-MM-DD หรือ "" สำหรับวันนี้)
+- "add_orders_bulk": รับออเดอร์หลายรายการพร้อมกัน (data: order_date YYYY-MM-DD หรือ "", orders: list of {{email, package_key}})
 - "daily_summary": รวมยอดกำไรวันที่ระบุ (data: date YYYY-MM-DD หรือ "" สำหรับวันนี้)
 - "summary": รวมยอดทั้งหมด
 - "check_expiring": ใกล้หมดอายุ (data: days)
@@ -234,17 +233,26 @@ FORMAT ออเดอร์ที่รองรับ:
 - ถ้ามีหลายออเดอร์ ให้ใช้ action: "add_orders_bulk"
 - ถ้ามีออเดอร์เดียว ให้ใช้ action: "add_order"
 
-ตัวอย่าง input:
+ถ้าผู้ใช้ระบุวันที่ย้อนหลัง เช่น "ย้อนหลังวันที่ 17 พ.ค." หรือ "บันทึกวันที่ 2026-05-17" ให้ใส่ order_date เป็นวันนั้น
+ถ้าไม่ระบุวันให้ใช้ "" (วันนี้)
+
+ตัวอย่าง input ย้อนหลัง:
+  บันทึกย้อนหลังวันที่ 17 พ.ค.
+  O1-5000 old done ✅
+  somchai@gmail.com
+→ {{"action": "add_orders_bulk", "data": {{"order_date": "2026-05-17", "orders": [{{"email": "somchai@gmail.com", "package_key": "5000"}}]}}}}
+
+ตัวอย่าง input ปกติ (วันนี้):
   O7-10000 old done ✅
   wassinner5@gmail.com
-→ {{"action": "add_order", "data": {{"email": "wassinner5@gmail.com", "package_key": "10000"}}}}
+→ {{"action": "add_order", "data": {{"email": "wassinner5@gmail.com", "package_key": "10000", "order_date": ""}}}}
 
 ตัวอย่าง input หลายรายการ:
   O1-5000 old done ✅
   fightforyout2@gmail.com
   O2-grok new
   malee@gmail.com
-→ {{"action": "add_orders_bulk", "data": {{"orders": [{{"email": "fightforyout2@gmail.com", "package_key": "5000"}}, {{"email": "malee@gmail.com", "package_key": "grok"}}]}}}}
+→ {{"action": "add_orders_bulk", "data": {{"order_date": "", "orders": [{{"email": "fightforyout2@gmail.com", "package_key": "5000"}}, {{"email": "malee@gmail.com", "package_key": "grok"}}]}}}}
 
 คำสั่งอื่น:
 - "รวมยอดวันนี้" → daily_summary, date: ""
@@ -283,12 +291,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 package_key=data.get("package_key", ""),
                 name=data.get("name", ""),
                 phone=data.get("phone", ""),
+                order_date=data.get("order_date") or None,
             )
             if err:
                 reply = f"❌ {err}"
             else:
+                date_label = f" (ย้อนหลัง {order['date']})" if data.get("order_date") else ""
                 reply = (
-                    f"✅ บันทึกออเดอร์แล้ว!\n"
+                    f"✅ บันทึกออเดอร์แล้ว{date_label}!\n"
                     f"📧 {order['email']}\n"
                     f"📦 {order['package']}\n"
                     f"💰 ราคาขาย: {order['price']:,} บาท\n"
@@ -299,6 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "add_orders_bulk":
             orders = data.get("orders", [])
+            order_date = data.get("order_date") or None
             success = []
             errors = []
             total_profit = 0
@@ -307,6 +318,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 order, err = add_order(
                     email=o.get("email", ""),
                     package_key=o.get("package_key", ""),
+                    order_date=order_date,
                 )
                 if err:
                     errors.append(f"❌ {o.get('email')} - {err}")
@@ -314,7 +326,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     success.append(f"✅ {order['email']} | {order['package']} | กำไร {order['profit']:,} บาท")
                     total_profit += order['profit']
 
-            lines = [f"📋 บันทึก {len(success)}/{len(orders)} ออเดอร์\n"]
+            date_label = f" (ย้อนหลัง {order_date})" if order_date else ""
+            lines = [f"📋 บันทึก {len(success)}/{len(orders)} ออเดอร์{date_label}\n"]
             lines += success
             if errors:
                 lines += errors
