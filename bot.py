@@ -167,22 +167,39 @@ def overall_summary():
             "total_price": total_price, "total_cost": total_cost,
             "profit": profit, "margin": margin}
 
-def check_expiring(days=7):
+def check_expiring(days=7, target_date=None):
     sh = init_sheets()
     ws = sh.worksheet("ลูกค้า")
     rows = ws.get_all_records()
-    today = datetime.now(TZ)
+    today = datetime.now(TZ).date()
     expiring = []
+
     for row in rows:
+        exp_str = str(row.get("วันหมดอายุ", ""))[:10]
         try:
-            exp = datetime.strptime(str(row.get("วันหมดอายุ", ""))[:10], "%Y-%m-%d")
-            diff = (exp.date() - today.date()).days
-            if 0 <= diff <= days:
-                expiring.append({
-                    "name": row.get("ชื่อ"), "email": row.get("อีเมล"),
-                    "package": row.get("แพ็กเกจ"),
-                    "expire": str(row.get("วันหมดอายุ"))[:10], "days_left": diff
-                })
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+
+            if target_date:
+                # ถามเฉพาะวันที่ระบุ
+                target = datetime.strptime(target_date, "%Y-%m-%d").date()
+                if exp_date == target:
+                    diff = (exp_date - today).days
+                    expiring.append({
+                        "email": row.get("อีเมล"),
+                        "package": row.get("แพ็กเกจ"),
+                        "expire": exp_str,
+                        "days_left": diff
+                    })
+            else:
+                # ถามช่วงกี่วันข้างหน้า (รวมที่หมดไปแล้วด้วยถ้า days < 0)
+                diff = (exp_date - today).days
+                if 0 <= diff <= days:
+                    expiring.append({
+                        "email": row.get("อีเมล"),
+                        "package": row.get("แพ็กเกจ"),
+                        "expire": exp_str,
+                        "days_left": diff
+                    })
         except:
             pass
     return expiring
@@ -221,7 +238,9 @@ ACTION:
 - "add_orders_bulk": หลายออเดอร์ (data: order_date, orders: [{{email, package_key}}])
 - "daily_summary": รวมยอดวัน (data: date YYYY-MM-DD หรือ "")
 - "summary": รวมยอดทั้งหมด
-- "check_expiring": ใกล้หมดอายุ (data: days)
+- "check_expiring": ดูใกล้หมดอายุ (data: days จำนวนวัน) หรือระบุวันที่ (data: target_date "YYYY-MM-DD")
+  ตัวอย่าง: "วันที่ 21 พ.ค. มีใครหมดอายุ" → check_expiring, target_date: "2026-05-21"
+  ตัวอย่าง: "ใครหมดอายุสัปดาห์นี้" → check_expiring, days: 7
 - "search": ค้นหา (data: keyword)
 - "chat": แค่คุย
 
@@ -349,14 +368,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "check_expiring":
             days = data.get("days", 7)
-            expiring = check_expiring(days)
+            target_date = data.get("target_date") or None
+            expiring = check_expiring(days=days, target_date=target_date)
+
+            label = f"วันที่ {target_date}" if target_date else f"ใน {days} วันข้างหน้า"
             if expiring:
-                lines = [f"⚠️ ใกล้หมดอายุใน {days} วัน ({len(expiring)} ราย):\n"]
+                lines = [f"⚠️ หมดอายุ{label} ({len(expiring)} ราย):\n"]
                 for c in expiring:
-                    lines.append(f"• {c['email']} | {c['package']} - หมด {c['expire']} (อีก {c['days_left']} วัน)")
+                    days_label = f"(อีก {c['days_left']} วัน)" if c['days_left'] >= 0 else f"(หมดไปแล้ว {abs(c['days_left'])} วัน)"
+                    lines.append(f"• 📧 {c['email']} | 📦 {c['package']} {days_label}")
                 reply = "\n".join(lines)
             else:
-                reply = f"✅ ไม่มีลูกค้าหมดอายุใน {days} วันข้างหน้า"
+                reply = f"✅ ไม่มีลูกค้าหมดอายุ{label}"
 
         elif action == "search":
             keyword = data.get("keyword", "")
