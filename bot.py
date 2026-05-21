@@ -26,7 +26,7 @@ SCOPES = [
 
 PRODUCTS = {
     "5000":  {"name": "5000 เครดิต",  "cost": 1000, "price": 1490},
-    "10000": {"name": "10000 เครดิต", "cost": 1200, "price": 1690},
+    "10000": {"name": "10000 เครดิต", "cost": 1300, "price": 1690},
     "25000": {"name": "25000 เครดิต", "cost": 1500, "price": 2190},
     "grok":  {"name": "Grok",         "cost": 250,  "price": 599},
 }
@@ -228,7 +228,9 @@ def search_customer(keyword):
 PRODUCT_LIST = "\n".join([f'- "{k}": {v["name"]} ราคาขาย {v["price"]} ต้นทุน {v["cost"]} บาท'
                            for k, v in PRODUCTS.items()])
 
-SYSTEM_PROMPT = f"""คุณคือผู้ช่วยธุรกิจ ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่น
+def get_system_prompt():
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    return f"""คุณคือผู้ช่วยธุรกิจ ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่น
 
 FORMAT:
 {{"action": "...", "data": {{}}, "reply": "..."}}
@@ -239,7 +241,7 @@ ACTION:
 - "daily_summary": รวมยอดวัน (data: date YYYY-MM-DD หรือ "")
 - "summary": รวมยอดทั้งหมด
 - "check_expiring": ดูใกล้หมดอายุ (data: days จำนวนวัน) หรือระบุวันที่ (data: target_date "YYYY-MM-DD")
-  ตัวอย่าง: "วันที่ 21 พ.ค. มีใครหมดอายุ" → check_expiring, target_date: "2026-05-21"
+  ตัวอย่าง: "วันที่ 21 พ.ค. มีใครหมดอายุ" → check_expiring, target_date: "{today}"
   ตัวอย่าง: "ใครหมดอายุสัปดาห์นี้" → check_expiring, days: 7
 - "search": ค้นหา (data: keyword)
 - "chat": แค่คุย
@@ -255,14 +257,15 @@ ACTION:
 - หลายออเดอร์ → add_orders_bulk
 - ย้อนหลัง เช่น "วันที่ 17 พ.ค." → order_date: "2026-05-17"
 
-วันนี้คือ {datetime.now(TZ).strftime("%Y-%m-%d")}
+วันนี้คือ {today} (เวลาไทย Asia/Bangkok)
+ห้ามใช้วันอื่นนอกจากนี้ ถ้าไม่มีการระบุวันย้อนหลัง
 """
 
 def ask_claude(user_message):
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
-        system=SYSTEM_PROMPT,
+        system=get_system_prompt(),
         messages=[{"role": "user", "content": user_message}]
     )
     text = re.sub(r"```json|```", "", response.content[0].text.strip()).strip()
