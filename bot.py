@@ -66,6 +66,60 @@ def init_sheets():
         })
     return sh
 
+def fix_sheet_format():
+    """จัด format ชีทบัญชีทั้งหมดใหม่ — สีสลับแถว + % กำไร"""
+    sh = init_sheets()
+    ws = sh.worksheet("บัญชี")
+    total_rows = len(ws.col_values(1))  # นับแถวทั้งหมดรวม header
+
+    if total_rows < 2:
+        return 0
+
+    requests = []
+    for row in range(2, total_rows + 1):
+        # สีสลับ
+        if row % 2 == 0:
+            bg = {"red": 0.89, "green": 0.94, "blue": 0.85}
+        else:
+            bg = {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+        # format สีแถว A-G
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 7
+                },
+                "cell": {"userEnteredFormat": {"backgroundColor": bg}},
+                "fields": "userEnteredFormat.backgroundColor"
+            }
+        })
+
+        # format % กำไร คอลัมน์ G
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": 6,
+                    "endColumnIndex": 7
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "PERCENT", "pattern": "0.0%"}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        })
+
+    sh.batch_update({"requests": requests})
+    return total_rows - 1
+
 def add_orders_batch(orders_list, order_date=None):
     sh = init_sheets()
     today = datetime.now(TZ)
@@ -113,6 +167,22 @@ def add_orders_batch(orders_list, order_date=None):
         ws_c.append_rows(rows_c)
     if rows_a:
         ws_a.append_rows(rows_a, value_input_option="USER_ENTERED")
+        # format แถวใหม่
+        requests = []
+        start = next_row_a - len(rows_a)
+        for i, row in enumerate(range(start, next_row_a)):
+            bg = {"red": 0.89, "green": 0.94, "blue": 0.85} if row % 2 == 0 else {"red": 1.0, "green": 1.0, "blue": 1.0}
+            requests.append({"repeatCell": {
+                "range": {"sheetId": ws_a.id, "startRowIndex": row-1, "endRowIndex": row, "startColumnIndex": 0, "endColumnIndex": 7},
+                "cell": {"userEnteredFormat": {"backgroundColor": bg}},
+                "fields": "userEnteredFormat.backgroundColor"
+            }})
+            requests.append({"repeatCell": {
+                "range": {"sheetId": ws_a.id, "startRowIndex": row-1, "endRowIndex": row, "startColumnIndex": 6, "endColumnIndex": 7},
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
+                "fields": "userEnteredFormat.numberFormat"
+            }})
+        sh.batch_update({"requests": requests})
 
     return results, errors
 
@@ -244,7 +314,7 @@ ACTION:
 - "check_expiring": ดูใกล้หมดอายุ (data: days จำนวนวัน) หรือระบุวันที่ (data: target_date "YYYY-MM-DD")
   ตัวอย่าง: "วันที่ 21 พ.ค. มีใครหมดอายุ" → check_expiring, target_date: "{today}"
   ตัวอย่าง: "ใครหมดอายุสัปดาห์นี้" → check_expiring, days: 7
-- "search": ค้นหา (data: keyword)
+- "fix_sheet": จัด format ชีทบัญชีใหม่ทั้งหมด (สี + % กำไร)
 - "chat": แค่คุย
 
 แพ็กเกจ:
@@ -384,6 +454,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply = "\n".join(lines)
             else:
                 reply = f"✅ ไม่มีลูกค้าหมดอายุ{label}"
+
+        elif action == "fix_sheet":
+            count = fix_sheet_format()
+            reply = f"✅ จัด format ชีทบัญชีใหม่เรียบร้อย {count} แถวครับ"
 
         elif action == "search":
             keyword = data.get("keyword", "")
