@@ -29,6 +29,7 @@ PRODUCTS = {
     "10000": {"name": "10000 เครดิต", "cost": 1300, "price": 1690},
     "25000": {"name": "25000 เครดิต", "cost": 1500, "price": 2190},
     "grok":  {"name": "Grok",         "cost": 250,  "price": 599},
+    "0":     {"name": "0 เครดิต",     "cost": 890,  "price": 1250},
 }
 
 # ========== GOOGLE SHEETS ==========
