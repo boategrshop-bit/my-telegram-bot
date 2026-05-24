@@ -315,6 +315,7 @@ ACTION:
   ตัวอย่าง: "วันที่ 21 พ.ค. มีใครหมดอายุ" → check_expiring, target_date: "{today}"
   ตัวอย่าง: "ใครหมดอายุสัปดาห์นี้" → check_expiring, days: 7
 - "fix_sheet": จัด format ชีทบัญชีใหม่ทั้งหมด (สี + % กำไร)
+  ตัวอย่าง: "จัดชีทใหม่", "fix sheet", "แก้ตาราง", "จัด format" → fix_sheet
 - "chat": แค่คุย
 
 แพ็กเกจ:
